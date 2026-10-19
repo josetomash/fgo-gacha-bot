@@ -1,4 +1,6 @@
-import { CanvasRenderingContext2D, createCanvas, loadImage } from 'canvas';
+import {
+    CanvasRenderingContext2D, createCanvas, Image, loadImage,
+} from 'canvas';
 import { cache } from '../util/cache';
 import {
     CardType, ICard, IResponse, IServant,
@@ -18,6 +20,54 @@ export class Gacha {
     constructor() {
         this.scraperServants = new ScraperServants();
         this.scraperEssences = new ScraperEssences();
+    }
+
+    // Dibuja la imagen recortándola al centro para que llene el recuadro sin deformarse
+    private static drawCover(
+        ctx: CanvasRenderingContext2D,
+        image: Image,
+        dx: number,
+        dy: number,
+        dw: number,
+        dh: number,
+    ): void {
+        const targetRatio = dw / dh;
+        const sourceRatio = image.width / image.height;
+        let sx = 0;
+        let sy = 0;
+        let sw = image.width;
+        let sh = image.height;
+
+        if (sourceRatio > targetRatio) {
+            sw = image.height * targetRatio;
+            sx = (image.width - sw) / 2;
+        } else {
+            sh = image.width / targetRatio;
+            sy = (image.height - sh) * 0.15;
+        }
+
+        ctx.drawImage(image, sx, sy, sw, sh, dx, dy, dw, dh);
+    }
+
+    private static async loadClassIcon(className: string, rarity: number): Promise<Image | undefined> {
+        const lower = className.toLowerCase();
+        const snake = className.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase();
+        const names = [lower, snake].filter((name, i, all) => all.indexOf(name) === i);
+
+        for (let i = 0; i < names.length; i += 1) {
+            try {
+                // eslint-disable-next-line no-await-in-loop
+                return await loadImage(
+                    `${__dirname}/../../resources/images/servant/classes/${names[i]}_${rarity}.png`,
+                );
+            } catch (error) {
+                // prueba el siguiente nombre
+            }
+        }
+
+        console.warn(`Class icon not found for ${className} (rarity ${rarity})`);
+
+        return undefined;
     }
 
     private static async drawCanvas(
@@ -52,7 +102,8 @@ export class Gacha {
                     - (constants.images.frame.width + (rows[row].length - 1) * dxI)) / 2;
                 const dy = row * constants.images.frame.height + row * config.cardMargin;
 
-                canvasContext.drawImage(
+                Gacha.drawCover(
+                    canvasContext,
                     image,
                     dx,
                     dy + constants.images[card.type].offset,
@@ -63,15 +114,18 @@ export class Gacha {
                 canvasContext.drawImage(overlay, dx, dy);
 
                 if (card.type === CardType.Servant) {
-                    const classIcon = await loadImage(
-                        `${__dirname}/../../resources/images/servant/classes/${(card as IServant).class.toLowerCase()}_${card.rarity}.png`,
+                    const classIcon = await Gacha.loadClassIcon(
+                        (card as IServant).class,
+                        card.rarity,
                     );
 
-                    canvasContext.drawImage(
-                        classIcon,
-                        dx + constants.images.frame.width / 2 - constants.images.class.width / 2,
-                        dy + (constants.images.frame.height - constants.images.class.offset),
-                    );
+                    if (classIcon) {
+                        canvasContext.drawImage(
+                            classIcon,
+                            dx + constants.images.frame.width / 2 - constants.images.class.width / 2,
+                            dy + (constants.images.frame.height - constants.images.class.offset),
+                        );
+                    }
                 }
             }
         }
@@ -89,6 +143,13 @@ export class Gacha {
             ...card,
             image: await this.scraperEssences.getCardImage(card),
         };
+    }
+
+    private static pickCard(pool: ICard[], rarity: number): ICard {
+        const slice = pool.filter((p) => p.rarity === rarity);
+        const source = slice.length ? slice : pool;
+
+        return source[Math.floor(Math.random() * source.length)];
     }
 
     private sample(rates: IRate[]): IRate {
@@ -155,7 +216,7 @@ export class Gacha {
             const addSize = (maxLineLength - (7 * row.length + 3 * (row.length - 1)));
             const line = `${row.map((card) => `${card.type === CardType.Servant ? 'S ' : 'CE'} [${`${card.id}`.padStart(4, '0')}](${card.url})`).join(' | ')}`;
 
-            bannerInfo += `${' ‎'.repeat(Math.max(0, (addSize))) + line}\n`;
+            bannerInfo += `${' \u200E'.repeat(Math.max(0, (addSize))) + line}\n`;
         });
 
         return bannerInfo;
@@ -163,7 +224,9 @@ export class Gacha {
 
     public async gacha(stage: string, howManyCards: number): Promise<IResponse> {
         const stageAsString = stage ? `${stage}` : '1';
-        const numberOfCards = howManyCards ?? config.cardsPerRoll;
+        const numberOfCards = Number.isFinite(howManyCards) && howManyCards > 0
+            ? howManyCards
+            : config.cardsPerRoll;
 
         const cardPool = {
             [CardType.Servant]: cache.get(constants.servantCacheKey),
@@ -178,11 +241,9 @@ export class Gacha {
             randomCards.push(this.getRandomCard());
         }
 
-        const banner = randomCards.map((card: IRate) => {
-            const slice = cardPool[card.type].filter((p) => p.rarity === card.rarity);
-
-            return slice[Math.floor(Math.random() * slice.length)];
-        }).sort(() => Math.random() - 0.5);
+        const banner = randomCards
+            .map((card: IRate) => Gacha.pickCard(cardPool[card.type], card.rarity))
+            .sort(() => Math.random() - 0.5);
 
         const cardsWithImage = await Promise.all(
             banner.map((card) => this.getCardWithImage(card, stageAsString)),
@@ -220,8 +281,7 @@ export class Gacha {
         ];
 
         const rate = this.sample(rates);
-        const slice = cache.get(constants.servantCacheKey).filter((p) => p.rarity === rate.rarity);
-        const card = slice[Math.floor(Math.random() * slice.length)];
+        const card = Gacha.pickCard(cache.get(constants.servantCacheKey), rate.rarity);
         const cardWithImage = await this.getCardWithImage(
             card,
             stageAsString,
@@ -233,7 +293,9 @@ export class Gacha {
         );
         const canvasContext = canvas.getContext('2d');
         const image = await loadImage(`${cardWithImage.image}`);
-        canvasContext.drawImage(
+
+        Gacha.drawCover(
+            canvasContext,
             image,
             0,
             0,
