@@ -1,46 +1,24 @@
-import { CardType } from '../fgo/types';
-
-export interface IRate {
+export interface ICard {
+    id: number,
+    atlasId?: number,
     type: CardType,
+    name: string,
     rarity: number,
-    rate: number,
+    url: string,
+    image?: string,
 }
 
-export interface IImageSize {
-    width: number,
-    height: number,
-    offset: number,
+export enum CardType {
+    Servant = 'servant',
+    Essence = 'essence'
 }
 
-export interface IConstants {
-    wikiBaseUrl: string,
-    servantListPage: string,
-    essenceListPage: string,
-
-    servantCacheKey: string,
-    essenceCacheKey: string,
-
-    stages: string[],
-
-    rates: {
-        [CardType.Servant]: IRate[],
-        [CardType.Essence]: IRate[],
-    },
-
-    images: {
-        frame: IImageSize,
-        class: IImageSize,
-        [CardType.Servant]: IImageSize,
-        [CardType.Essence]: IImageSize,
-    }
+export interface IServant extends ICard {
+    class: string
 }
 
-export interface IRules {
-    [CardType.Servant]: string[]
-}
-
-export interface IConfig {
-    cardsPerRoll: number,
-    cardsPerRow: number,
-    cardMargin: number,
+export interface IResponse {
+    description: string,
+    image: Buffer,
+    cards?: ICard[],
 }
