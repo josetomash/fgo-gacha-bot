@@ -8,6 +8,18 @@ export const ATLAS_REGION = 'NA';
 
 const USER_AGENT = 'fgo-gacha-bot (Discord bot)';
 
+export interface ILoreComment {
+    id?: number,
+    priority?: number,
+    comment?: string,
+}
+
+export interface ILoreProfile {
+    comments?: ILoreComment[],
+}
+
+export const descriptionCache: Map<string, string | null> = new Map();
+
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -41,6 +53,21 @@ export async function atlasGet<R>(url: string, config: AxiosRequestConfig = {}):
     }
 
     throw lastError;
+}
+
+export function pickDescription(profile?: ILoreProfile): string | undefined {
+    const comments = (profile && profile.comments) || [];
+    const usable = comments
+        .filter((c) => c && typeof c.comment === 'string' && c.comment.trim().length > 0)
+        .sort((a, b) => ((a.priority || 0) - (b.priority || 0)) || ((a.id || 0) - (b.id || 0)));
+
+    if (!usable.length) {
+        return undefined;
+    }
+
+    const text = (usable[0].comment as string).replace(/\s+/g, ' ').trim();
+
+    return text.length > 280 ? `${text.slice(0, 277).trim()}...` : text;
 }
 
 export abstract class Scraper {
@@ -80,7 +107,34 @@ export abstract class Scraper {
         }
     }
 
+    // Descripción opcional: si algo falla, simplemente devuelve undefined
+    protected async loadDescription(card: ICard, endpoint: 'servant' | 'equip'): Promise<string | undefined> {
+        const key = `${card.type}:${card.id}`;
+
+        if (descriptionCache.has(key)) {
+            return descriptionCache.get(key) || undefined;
+        }
+
+        try {
+            const detail = await atlasGet<{ profile?: ILoreProfile }>(
+                `${ATLAS_API}/nice/${ATLAS_REGION}/${endpoint}/${card.atlasId}`,
+                { params: { lore: true } },
+            );
+            const description = pickDescription(detail.profile);
+
+            descriptionCache.set(key, description || null);
+
+            return description;
+        } catch (error) {
+            console.error(`Could not fetch description for ${card.name}:`, error.message);
+
+            return undefined;
+        }
+    }
+
     public abstract scrape(): Promise<void>;
 
     public abstract getCardImage(card: ICard, stage?: string): Promise<string>;
+
+    public abstract getDescription(card: ICard): Promise<string | undefined>;
 }
