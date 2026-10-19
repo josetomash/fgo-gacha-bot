@@ -321,4 +321,19 @@ export class Gacha {
             cards: [card],
         };
     }
+
+    public async renderSingleCard(card: ICard, stage = '1'): Promise<Buffer> {
+        const cardWithImage = await this.getCardWithImage(card, stage);
+        const rows = [[cardWithImage]];
+        const canvas = createCanvas(
+            constants.images.frame.width,
+            constants.images.frame.height,
+        );
+        const canvasContext = canvas.getContext('2d');
+
+        await Gacha.drawCanvasRows(rows, canvasContext);
+
+        return canvas.toBuffer();
+    }
 }
+

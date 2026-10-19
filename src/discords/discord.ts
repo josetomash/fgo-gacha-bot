@@ -1,8 +1,13 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { Command, CommandMessage, Discord } from '@typeit/discord';
+import { MessageAttachment, MessageEmbed } from 'discord.js';
 import { Gacha } from '../fgo/gacha';
-import { CardType, IResponse } from '../fgo/types';
-import { economy, stars } from '../config/economy';
+import { CardType, ICard, IResponse } from '../fgo/types';
+import { economy, getClaimCost, stars } from '../config/economy';
+import { constants } from '../config/constants';
+import { cache } from '../util/cache';
+import { ScraperServants } from '../fgo/scraper.servants';
+import { ScraperEssences } from '../fgo/scraper.essences';
 import { buildClaimComponents } from '../claimUi';
 import {
     getCollection, getPlayer, IPullCard, minutesUntilRegen, savePull,
@@ -106,30 +111,147 @@ export class DiscordApp {
         }
     }
 
-    @Command('collection')
+    @Command(/(collection|col|c)/)
     async collection(command: CommandMessage<CommandArgs>): Promise<void> {
         try {
+            const rawArgs = command.content
+                .replace(/^!!(collection|col|c)\s*/i, '')
+                .trim();
+            const parts = rawArgs.split(/\s+/).filter(Boolean);
+
             const cards = await getCollection(command.author.id);
 
             if (!cards.length) {
-                await command.reply('aún no has reclamado nada. Prueba `!!gacha 1 11` o `!!waifu 1`.');
-
+                await command.reply('Aún no has reclamado nada en tu colección. Prueba `!!gacha 1 11` o `!!waifu 1` y reclama tus cartas.');
                 return;
             }
 
-            const line = (c: { name: string, rarity: number, count: number }) => `${stars(c.rarity)} ${c.name}${c.count > 1 ? ` x${c.count}` : ''}`;
             const servants = cards.filter((c) => c.type === CardType.Servant);
             const essences = cards.filter((c) => c.type === CardType.Essence);
-            const text = [
-                `**Tu colección:** ${servants.length} servants · ${essences.length} esencias`,
-                servants.length ? `\n**Servants**\n${servants.slice(0, 25).map(line).join('\n')}` : '',
-                essences.length ? `\n**Esencias**\n${essences.slice(0, 15).map(line).join('\n')}` : '',
-            ].join('\n');
 
-            await command.reply(text.slice(0, 1900));
+            // Si no se pasaron argumentos: listar con índices
+            if (parts.length === 0) {
+                const line = (c: { name: string, rarity: number, count: number }, idx: number) =>
+                    `[${idx + 1}] ${stars(c.rarity)} ${c.name}${c.count > 1 ? ` x${c.count}` : ''}`;
+
+                const text = [
+                    `**Tu colección:** ${servants.length} servants · ${essences.length} esencias\n`
+                    + '*(Usa `!!collection servant {índice}` o `!!collection essence {índice}` para ver la imagen y detalles)*',
+                    servants.length ? `\n**Servants**\n${servants.map((c, i) => line(c, i)).join('\n')}` : '',
+                    essences.length ? `\n**Esencias**\n${essences.map((c, i) => line(c, i)).join('\n')}` : '',
+                ].join('\n');
+
+                if (text.length > 1950) {
+                    // Si excede el límite de mensaje de Discord, truncar amigablemente
+                    await command.reply(text.slice(0, 1900) + '\n\n*... (más cartas en tu colección)*');
+                } else {
+                    await command.reply(text);
+                }
+                return;
+            }
+
+            // Determinar tipo e índice según argumentos y aliases
+            let targetType = CardType.Servant;
+            let indexStr = '';
+
+            const servantAliases = ['servant', 's', 'svt', 'serv'];
+            const essenceAliases = ['essence', 'ce', 'e', 'ess', 'esencia', 'esencias'];
+
+            if (parts.length === 1) {
+                // Solo un argumento: si es número, por defecto se toma como servant
+                if (/^\d+$/.test(parts[0])) {
+                    targetType = CardType.Servant;
+                    indexStr = parts[0];
+                } else {
+                    await command.reply('Por favor especifica un índice numérico. Ejemplo: `!!collection 1` o `!!collection ce 1`');
+                    return;
+                }
+            } else {
+                const first = parts[0].toLowerCase();
+                const second = parts[1].toLowerCase();
+
+                if (servantAliases.includes(first)) {
+                    targetType = CardType.Servant;
+                    indexStr = second;
+                } else if (essenceAliases.includes(first)) {
+                    targetType = CardType.Essence;
+                    indexStr = second;
+                } else if (/^\d+$/.test(first)) {
+                    // Por si el usuario escribe `!!collection 1 servant` o `!!collection 1 ce`
+                    indexStr = first;
+                    if (essenceAliases.includes(second)) {
+                        targetType = CardType.Essence;
+                    } else {
+                        targetType = CardType.Servant;
+                    }
+                } else {
+                    // Tipo desconocido, asumir servant y comprobar si segundo es número
+                    targetType = CardType.Servant;
+                    indexStr = second;
+                }
+            }
+
+            const targetIndex = parseInt(indexStr, 10);
+            if (Number.isNaN(targetIndex) || targetIndex <= 0) {
+                await command.reply('El índice debe ser un número mayor a 0. Ejemplo: `!!collection s 1` o `!!collection ce 1`');
+                return;
+            }
+
+            const targetList = targetType === CardType.Servant ? servants : essences;
+            const typeLabel = targetType === CardType.Servant ? 'servants' : 'esencias';
+
+            if (targetIndex > targetList.length) {
+                await command.reply(`El índice **${targetIndex}** no existe en tu lista de ${typeLabel}. Tienes **${targetList.length}** en total.`);
+                return;
+            }
+
+            const claimedItem = targetList[targetIndex - 1];
+
+            // Buscar la carta en el pool cacheado para tener atlasId, url, class, etc.
+            const cardPool: ICard[] = cache.get(
+                targetType === CardType.Servant ? constants.servantCacheKey : constants.essenceCacheKey,
+            ) || [];
+            const fullCard = cardPool.find((c) => c.id === claimedItem.cardId) || {
+                id: claimedItem.cardId,
+                name: claimedItem.name,
+                rarity: claimedItem.rarity,
+                type: targetType,
+                url: `https://apps.atlasacademy.io/db/NA/${targetType === CardType.Servant ? 'servant' : 'craft-essence'}/${claimedItem.cardId}`,
+            } as ICard;
+
+            // Obtener descripción (NP o Lore o Habilidad)
+            let lore: string | undefined;
+            try {
+                lore = await (targetType === CardType.Servant
+                    ? new ScraperServants().getDescription(fullCard)
+                    : new ScraperEssences().getDescription(fullCard));
+            } catch (err) {
+                console.error('Error al obtener descripción:', err);
+            }
+
+            const claimCost = getClaimCost(claimedItem.type, claimedItem.rarity);
+            const imageBuffer = await gacha.renderSingleCard(fullCard, '1');
+
+            const attachment = new MessageAttachment(imageBuffer, 'card.png');
+            const embed = new MessageEmbed()
+                .setTitle(`[${targetIndex}] ${stars(claimedItem.rarity)} ${claimedItem.name}${claimedItem.count > 1 ? ` (x${claimedItem.count})` : ''}`)
+                .setURL(fullCard.url)
+                .setColor(targetType === CardType.Servant ? 0xe74c3c : 0x3498db)
+                .addField('Tipo', targetType === CardType.Servant ? 'Servant' : 'Craft Essence', true)
+                .addField('ID', `#${claimedItem.cardId}`, true)
+                .addField('Precio de obtención', `${economy.quartzEmoji} **${claimCost}** de quarzo santo`, true)
+                .attachFiles([attachment])
+                .setImage('attachment://card.png');
+
+            if (lore) {
+                embed.setDescription(lore);
+            }
+
+            await command.reply(embed);
         } catch (error) {
             console.error('collection command failed:', error);
-            await command.reply('no pude cargar tu colección, intenta de nuevo.');
+            await command.reply('no pude procesar el comando collection, intenta de nuevo.');
         }
     }
 }
+
