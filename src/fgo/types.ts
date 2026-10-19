@@ -20,4 +20,5 @@ export interface IServant extends ICard {
 export interface IResponse {
     description: string,
     image: Buffer,
+    cards?: ICard[],
 }
