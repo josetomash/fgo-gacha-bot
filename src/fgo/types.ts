@@ -1,5 +1,6 @@
 export interface ICard {
     id: number,
+    atlasId?: number,
     type: CardType,
     name: string,
     rarity: number,
@@ -12,7 +13,7 @@ export enum CardType {
     Essence = 'essence'
 }
 
-export interface IServant extends ICard{
+export interface IServant extends ICard {
     class: string
 }
 
