@@ -10,6 +10,7 @@ import { IRate } from '../config/types';
 import { ScraperEssences } from './scraper.essences';
 import { ScraperServants } from './scraper.servants';
 import { config } from '../config/config';
+import { economy, getClaimCost, stars } from '../config/economy';
 import { chunk } from '../util/array';
 
 export class Gacha {
@@ -145,6 +146,12 @@ export class Gacha {
         };
     }
 
+    private getDescription(card: ICard): Promise<string | undefined> {
+        return card.type === CardType.Servant
+            ? this.scraperServants.getDescription(card)
+            : this.scraperEssences.getDescription(card);
+    }
+
     private static pickCard(pool: ICard[], rarity: number): ICard {
         const slice = pool.filter((p) => p.rarity === rarity);
         const source = slice.length ? slice : pool;
@@ -208,24 +215,21 @@ export class Gacha {
         return this.sample([...constants.rates.servant, ...constants.rates.essence]);
     }
 
-    private static getBannerInfo(rows: ICard[][]): string {
-        let bannerInfo = '';
-        const maxLineLength = 7 * config.cardsPerRow + 3 * (config.cardsPerRow - 1);
+    // Lista numerada: el número coincide con el botón de reclamar
+    private static getBannerInfo(cards: ICard[]): string {
+        return cards.map((card, index) => {
+            const kind = card.type === CardType.Servant ? 'S' : 'CE';
+            const cost = getClaimCost(card.type, card.rarity);
 
-        rows.forEach((row) => {
-            const addSize = (maxLineLength - (7 * row.length + 3 * (row.length - 1)));
-            const line = `${row.map((card) => `${card.type === CardType.Servant ? 'S ' : 'CE'} [${`${card.id}`.padStart(4, '0')}](${card.url})`).join(' | ')}`;
-
-            bannerInfo += `${' \u200E'.repeat(Math.max(0, (addSize))) + line}\n`;
-        });
-
-        return bannerInfo;
+            return `**${index + 1}.** ${stars(card.rarity)} [${card.name}](${card.url}) · ${kind} ${`${card.id}`.padStart(4, '0')} · ${economy.quartzEmoji} ${cost}`;
+        }).join('\n');
     }
 
     public async gacha(stage: string, howManyCards: number): Promise<IResponse> {
         const stageAsString = stage ? `${stage}` : '1';
-        const numberOfCards = Number.isFinite(howManyCards) && howManyCards > 0
-            ? howManyCards
+        const requested = Number(howManyCards);
+        const numberOfCards = Number.isFinite(requested) && requested > 0
+            ? Math.min(Math.max(Math.floor(requested), 2), economy.maxCardsPerRoll)
             : config.cardsPerRoll;
 
         const cardPool = {
@@ -250,12 +254,14 @@ export class Gacha {
         );
 
         const rows = chunk<ICard>(cardsWithImage, config.cardsPerRow).reverse();
-        const bannerInfo = Gacha.getBannerInfo(rows);
+        const orderedCards = rows.reduce((all, row) => all.concat(row), [] as ICard[]);
+        const bannerInfo = Gacha.getBannerInfo(orderedCards);
         const bannerImage = await Gacha.drawCanvas(rows, numberOfCards);
 
         return {
             description: bannerInfo,
             image: bannerImage,
+            cards: orderedCards,
         };
     }
 
@@ -303,9 +309,16 @@ export class Gacha {
             constants.images[CardType.Servant].height,
         );
 
+        const lore = await this.getDescription(card);
+        const cost = getClaimCost(card.type, card.rarity);
+        const description = `${stars(card.rarity)} [${card.name}](${card.url}) (${card.id})`
+            + `${lore ? `\n\n${lore}` : ''}`
+            + `\n\n${economy.quartzEmoji} ${cost}`;
+
         return {
-            description: `[${cardWithImage.name}](${cardWithImage.url}) (${cardWithImage.id})`,
+            description,
             image: canvas.toBuffer(),
+            cards: [card],
         };
     }
 }
