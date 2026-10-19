@@ -9,6 +9,9 @@
       "forceConsistentCasingInFileNames": true,
       "importHelpers": true,
       "inlineSources": false,
+      "types": [
+        "node"
+      ],
       "lib": [
           "es2017",
           "esnext.asynciterable"
