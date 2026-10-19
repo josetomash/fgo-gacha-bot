@@ -1,65 +1,58 @@
-import axios, { AxiosResponse } from 'axios';
-import cheerio from 'cheerio';
+import axios, { AxiosRequestConfig } from 'axios';
 import fs from 'fs';
-import { constants } from '../config/constants';
-import { cache } from '../util/cache';
+import path from 'path';
 import { ICard } from './types';
 
-export abstract class Scraper<T> {
-    protected cards: ICard[];
+export const ATLAS_API = 'https://api.atlasacademy.io';
+export const ATLAS_REGION = 'NA';
 
-    private readonly listPage: string;
+const USER_AGENT = 'fgo-gacha-bot (Discord bot)';
 
-    private readonly listPageTableId: string;
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-    private readonly cacheKey: string;
+export async function atlasGet<R>(url: string, config: AxiosRequestConfig = {}): Promise<R> {
+    const maxAttempts = 4;
+    let lastError: unknown;
 
-    protected constructor(listPage: string, listPageTableId: string, cacheKey: string) {
-        this.cards = [];
-        this.listPage = listPage;
-        this.listPageTableId = listPageTableId;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+            // eslint-disable-next-line no-await-in-loop
+            const response = await axios.get<R>(url, {
+                ...config,
+                headers: { 'User-Agent': USER_AGENT, ...(config.headers || {}) },
+                timeout: 30000,
+            });
+
+            return response.data;
+        } catch (error) {
+            lastError = error;
+            const status = error.response && error.response.status;
+            const retryable = !status || status === 429 || status >= 500;
+
+            if (!retryable) {
+                break;
+            }
+
+            // eslint-disable-next-line no-await-in-loop
+            await sleep(1000 * attempt);
+        }
+    }
+
+    throw lastError;
+}
+
+export abstract class Scraper {
+    protected cards: ICard[] = [];
+
+    protected readonly cacheKey: string;
+
+    protected constructor(cacheKey: string) {
         this.cacheKey = cacheKey;
     }
 
-    protected buildPageUrl(pageName: string): string {
-        return `${constants.wikiBaseUrl}/wiki/${pageName.replace('/wiki/', '')}`;
-    }
-
-    protected getId(e: Cheerio): number {
-        return parseInt(e.text(), 10);
-    }
-
-    protected getNameAndUrl(e: Cheerio): {name: string, url: string} {
-        const name = e.text();
-        const url = this.buildPageUrl(e.attr('href') || 'MISSING_URL');
-
-        return { name, url };
-    }
-
-    protected getRarity(e: Cheerio): number {
-        return e.text().split('★').length - 1;
-    }
-
-    protected subPagesFn(subPages: string[]): Promise<AxiosResponse>[] {
-        return subPages.map(async (classUrl) => axios.get(classUrl));
-    }
-
-    protected async saveCardImage(cardUrl: string, filePath: string): Promise<string> {
-        const response = await axios.get(cardUrl, {
-            responseType: 'stream',
-        });
-        const stream = fs.createWriteStream(filePath);
-
-        await new Promise((resolve) => {
-            response.data.pipe(stream);
-            stream.on('close', resolve);
-            stream.on('error', console.error);
-        });
-
-        return filePath;
-    }
-
-    protected getCardImagePath(card: ICard, stage?: string):string {
+    protected getCardImagePath(card: ICard, stage?: string): string {
         return `${__dirname}/../../resources/images/${card.type}/cards/${card.id + (stage ? `_${stage}` : '')}.png`;
     }
 
@@ -67,37 +60,27 @@ export abstract class Scraper<T> {
         return fs.existsSync(this.getCardImagePath(card, stage));
     }
 
-    protected abstract cardParseFn(cells: Cheerio, subPageResponse: AxiosResponse): void;
+    protected async saveCardImage(imageUrl: string, filePath: string): Promise<string> {
+        const data = await atlasGet<Buffer>(imageUrl, { responseType: 'arraybuffer' });
+
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+        fs.writeFileSync(filePath, Buffer.from(data));
+
+        return filePath;
+    }
+
+    // Descarga la imagen; si falla, devuelve la URL remota para que canvas la cargue directo
+    protected async downloadImage(imageUrl: string, filePath: string): Promise<string> {
+        try {
+            return await this.saveCardImage(imageUrl, filePath);
+        } catch (error) {
+            console.error(`Could not download ${imageUrl}:`, error.message);
+
+            return imageUrl;
+        }
+    }
+
+    public abstract scrape(): Promise<void>;
 
     public abstract getCardImage(card: ICard, stage?: string): Promise<string>;
-
-    public async scrape(): Promise<void> {
-        const response = await axios.get(this.buildPageUrl(this.listPage));
-        let $ = cheerio.load(response.data);
-
-        const subPages: string[] = [];
-        $(`#${this.listPageTableId} a`).each((_, e) => {
-            const page = $(e).attr('href');
-
-            if (page) {
-                subPages.push(this.buildPageUrl(page));
-            }
-        });
-
-        const subPagesResponses = await Promise.all(
-            this.subPagesFn(subPages),
-        );
-
-        subPagesResponses.forEach((subPageResponse) => {
-            $ = cheerio.load(subPageResponse.data);
-
-            $('#WikiaArticle .wikitable tr').each((_, e) => {
-                const cells = $(e).find('td');
-
-                this.cardParseFn(cells, subPageResponse);
-            });
-        });
-
-        cache.set(this.cacheKey, this.cards);
-    }
 }
