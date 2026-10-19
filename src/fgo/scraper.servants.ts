@@ -128,4 +128,8 @@ export class ScraperServants extends Scraper {
 
         return this.downloadImage(imageUrl, filePath);
     }
+
+    public getDescription(card: ICard): Promise<string | undefined> {
+        return this.loadDescription(card, 'servant');
+    }
 }
